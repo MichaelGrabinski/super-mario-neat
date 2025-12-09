@@ -10,8 +10,8 @@ gym.logger.set_level(40)
 
 
 class Train(train.Train):
-    def __init__(self, generations, file_name, parallel, level):
-        super().__init__(generations, parallel, level)
+    def __init__(self, generations, file_name, parallel, level, preset=None):
+        super().__init__(generations, parallel, level, preset=preset)
         self.actions = [
             [0, 0, 0, 1, 0, 1],
             [0, 0, 0, 1, 1, 1],
@@ -23,13 +23,15 @@ class Train(train.Train):
         config = neat.Config(neat.DefaultGenome, neat.DefaultReproduction,
                              neat.DefaultSpeciesSet, neat.DefaultStagnation,
                              config_file)
+        self._apply_preset(config)
         # p = neat.Population(config)
         p = neat.Checkpointer.restore_checkpoint(self.file_name)
         p.add_reporter(neat.StdOutReporter(True))
         p.add_reporter(neat.Checkpointer(5))
         stats = neat.StatisticsReporter()
         p.add_reporter(stats)
-        print("loaded checkpoint...")
+        print(f"Loaded checkpoint from {self.file_name}")
+        self.generation_offset = getattr(p, "generation", 0)
         winner = p.run(self._eval_genomes, n)
         win = p.best_genome
         pickle.dump(winner, open('winner.pkl', 'wb'))
