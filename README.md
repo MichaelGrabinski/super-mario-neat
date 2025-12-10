@@ -28,6 +28,13 @@ python3 main.py cont_train --gen <num_generations> --file <file>
 ```
 <br>
 
+On Windows, run commands from the repo root and point to the src config implicitly:
+```bash
+python src/main.py train --gen 10 --level 1-1
+```
+Per-generation metrics and topology svgs are written to `src/metrics/` (requires Graphviz installed system-wide). You'll see lines like `Wrote generation metrics to src/metrics/gen_0000.csv` and `Saved topology snapshot to src/metrics/net_gen_0000.svg`.
+On Windows the training pool runs single-process for stability; you can still set `--gen` and other flags normally.
+
 ## Running
 To run the finisher.pkl file, run
 <br>
@@ -43,6 +50,12 @@ If you want to run a different file, run<br>
 ```bash
 python3 main.py run --file <file_name>
 ```
+From the repo root on Windows, include the src prefix:
+```bash
+python src/main.py run --render
+```
+Run looks for config and pickle files relative to `src/` when not given absolute paths.
+To run a neat checkpoint directly (compressed or not), point at it with `--file`; the best genome in the checkpoint population is used.
 <br>
 
 ## Config

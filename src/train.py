@@ -18,7 +18,14 @@ class Train:
         ]
         self.generations = generations
         self.lock = mp.Lock()
-        self.par = parallel
+        self.sequential = False
+        if os.name == 'nt':
+            if parallel > 1:
+                print("Windows detected; forcing parallel=1 to keep FCEUX stable.")
+            self.par = 1
+            self.sequential = True
+        else:
+            self.par = parallel
         self.level = level
         self.metrics_dir = os.path.join(os.path.dirname(__file__), "metrics")
         self.generation_index = 0
@@ -29,43 +36,8 @@ class Train:
     def _get_actions(self, a):
         return self.actions[a.index(max(a))]
 
-    def _fitness_func_no_parallel(self, genomes, config):
-        env = gym.make('ppaquette/SuperMarioBros-'+self.level+'-Tiles-v0')
-        env.action_space
-        idx, genomes = zip(*genomes)
-        for genome in genomes:
-            try:
-                state = env.reset()
-                net = neat.nn.FeedForwardNetwork.create(genome, config)
-                done = False
-                i = 0
-                old = 40
-                while not done:
-                    state = state.flatten()
-                    output = net.activate(state)
-                    output = self._get_actions(output)
-                    s, reward, done, info = env.step(output)
-                    state = s
-                    i += 1
-                    if i % 50 == 0:
-                        if old == info['distance']:
-                            break
-                        else:
-                            old = info['distance']
-
-                # [print(str(i) + " : " + str(info[i]), end=" ") for i in info.keys()]
-                # print("\n******************************")
-
-                fitness = -1 if info['distance'] <= 40 else info['distance']
-                genome.fitness = fitness
-                env.close()
-            except KeyboardInterrupt:
-                env.close()
-                exit()
-
-    def _fitness_func(self, genome_id, genome, config, o):
+    def _evaluate_genome(self, genome_id, genome, config):
         env = gym.make('ppaquette/SuperMarioBros-' + self.level + '-Tiles-v0')
-        # env.configure(lock=self.lock)
         try:
             state = env.reset()
             net = neat.nn.FeedForwardNetwork.create(genome, config)
@@ -79,21 +51,21 @@ class Train:
                 output = net.activate(state)
                 output = self._get_actions(output)
                 s, reward, done, info = env.step(output)
+                info = info or {}
                 state = s
                 i += 1
                 reward_sum += reward
                 if i % 50 == 0:
-                    if old == info['distance']:
+                    distance = info.get('distance', 0)
+                    if old == distance:
                         early_stop = True
                         break
                     else:
-                        old = info['distance']
-
-            # [print(str(i) + " : " + str(info[i]), end=" ") for i in info.keys()]
-            # print("\n******************************")
+                        old = distance
 
             distance = info.get('distance', 0)
             fitness = -1 if distance <= 40 else distance
+            genome.fitness = fitness
             if fitness >= 3252:
                 pickle.dump(genome, open("finisher.pkl", "wb"))
                 print("Finisher found; genome saved to finisher.pkl")
@@ -106,11 +78,15 @@ class Train:
                 "reward_sum": reward_sum,
                 "level": self.level,
             }
-            o.put(metrics)
-            env.close()
+            return metrics
         except KeyboardInterrupt:
+            raise
+        finally:
             env.close()
-            exit()
+
+    def _fitness_func(self, genome_id, genome, config, o):
+        metrics = self._evaluate_genome(genome_id, genome, config)
+        o.put(metrics)
 
     def _eval_genomes(self, genomes, config):
         generation = self.generation_offset + self.generation_index
@@ -118,26 +94,38 @@ class Train:
         genomes = list(genomes)
 
         generation_logs = []
-        for i in range(0, len(genomes), self.par):
-            output = mp.Queue()
+        print(f"Evaluating generation {generation} with {len(genomes)} genomes...")
+        if self.sequential:
+            for genome_id, genome in genomes:
+                metrics = self._evaluate_genome(genome_id, genome, config)
+                metrics["generation"] = generation
+                generation_logs.append(metrics)
+        else:
+            for i in range(0, len(genomes), self.par):
+                output = mp.Queue()
 
-            chunk = genomes[i:i + self.par]
-            chunk_map = {genome_id: genome for genome_id, genome in chunk}
-            processes = [mp.Process(target=self._fitness_func, args=(genome_id, genome, config, output)) for
-                         genome_id, genome in chunk]
+                chunk = genomes[i:i + self.par]
+                chunk_map = {genome_id: genome for genome_id, genome in chunk}
+                processes = [mp.Process(target=self._fitness_func, args=(genome_id, genome, config, output)) for
+                             genome_id, genome in chunk]
 
-            [p.start() for p in processes]
-            [p.join() for p in processes]
+                [p.start() for p in processes]
+                [p.join() for p in processes]
 
-            results = [output.get() for _ in processes]
+                results = []
+                for _ in processes:
+                    try:
+                        results.append(output.get_nowait())
+                    except Exception:
+                        print("Warning: missing result from a worker process; skipping.")
 
-            for result in results:
-                genome_id = result["genome_id"]
-                genome_obj = chunk_map.get(genome_id)
-                if genome_obj is not None:
-                    genome_obj.fitness = result["fitness"]
-                result["generation"] = generation
-                generation_logs.append(result)
+                for result in results:
+                    genome_id = result["genome_id"]
+                    genome_obj = chunk_map.get(genome_id)
+                    if genome_obj is not None:
+                        genome_obj.fitness = result["fitness"]
+                    result["generation"] = generation
+                    generation_logs.append(result)
 
         self._write_generation_metrics(generation, generation_logs, genomes)
         self._prune_checkpoints(limit=5)
@@ -146,6 +134,7 @@ class Train:
         config = neat.Config(neat.DefaultGenome, neat.DefaultReproduction,
                              neat.DefaultSpeciesSet, neat.DefaultStagnation,
                              config_file)
+        self.config = config
         self._apply_preset(config)
         p = neat.Population(config)
         p.add_reporter(neat.StdOutReporter(True))
@@ -174,6 +163,7 @@ class Train:
 
     def _write_generation_metrics(self, generation, logs, genome_records):
         if not logs:
+            print(f"No logs recorded for generation {generation}, skipping metrics write.")
             return
         path = os.path.join(self.metrics_dir, f"gen_{generation:04d}.csv")
         fieldnames = ["generation", "genome_id", "fitness", "distance", "steps", "early_stop", "reward_sum", "level"]
@@ -181,6 +171,7 @@ class Train:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(logs)
+        print(f"Wrote generation metrics to {path}")
 
         # Append to rolling all.csv
         all_path = os.path.join(self.metrics_dir, "all.csv")
@@ -217,6 +208,12 @@ class Train:
             if self.best_fitness_so_far is None or best_entry["fitness"] > self.best_fitness_so_far:
                 self.best_fitness_so_far = best_entry["fitness"]
                 pickle.dump(best_genome, open(os.path.join(self.metrics_dir, "best_overall.pkl"), "wb"))
+            try:
+                net_path = os.path.join(self.metrics_dir, f"net_gen_{generation:04d}")
+                visualize.draw_net(self.config, best_genome, view=False, filename=net_path, prune_unused=True)
+                print(f"Saved topology snapshot to {net_path}.svg")
+            except Exception as e:
+                print(f"Could not render topology for generation {generation}: {e}")
 
     def _prune_checkpoints(self, limit=5):
         # Keep only the newest N neat-checkpoint-* files.

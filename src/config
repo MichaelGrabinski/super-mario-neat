@@ -3,12 +3,13 @@ fitness_criterion     = max
 fitness_threshold     = 3252
 pop_size              = 150
 reset_on_extinction   = True
+no_fitness_termination  = False
 
 [DefaultGenome]
 # node activation options
 activation_default      = relu
 activation_mutate_rate  = 0.01
-activation_options      = sigmoid
+activation_options      = relu sigmoid
 
 # node aggregation options
 aggregation_default     = sum
@@ -18,6 +19,7 @@ aggregation_options     = sum
 # node bias options
 bias_init_mean          = 0.0
 bias_init_stdev         = 1.0
+bias_init_type          = gaussian
 bias_max_value          = 30.0
 bias_min_value          = -30.0
 bias_mutate_power       = 2.093
@@ -35,6 +37,12 @@ conn_delete_prob        = 0.146
 # connection enable options
 enabled_default         = True
 enabled_mutate_rate     = 0.01
+enabled_rate_to_true_add  = 0.0
+enabled_rate_to_false_add = 0.0
+
+# structural mutation behavior
+single_structural_mutation = False
+structural_mutation_surer  = default
 
 feed_forward            = True
 initial_connection      = unconnected
@@ -51,6 +59,7 @@ num_outputs             = 2
 # node response options
 response_init_mean      = 1.0
 response_init_stdev     = 0.0
+response_init_type      = gaussian
 response_max_value      = 30.0
 response_min_value      = -30.0
 response_mutate_power   = 0.1
@@ -60,6 +69,7 @@ response_replace_rate   = 0.0
 # connection weight options
 weight_init_mean        = 0.0
 weight_init_stdev       = 1.0
+weight_init_type        = gaussian
 weight_max_value        = 30
 weight_min_value        = -30
 weight_mutate_power     = 0.825
@@ -77,3 +87,4 @@ species_elitism      = 2
 [DefaultReproduction]
 elitism            = 2
 survival_threshold = 0.1
+min_species_size   = 1
