@@ -5,7 +5,13 @@ import neat
 import gym, ppaquette_gym_super_mario
 import pickle
 import multiprocessing as mp
+import queue
 import visualize
+import neat.reporting
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except Exception:
+    SummaryWriter = None
 
 gym.logger.set_level(40)
 
@@ -32,6 +38,12 @@ class Train:
         self.generation_offset = 0
         self.preset = preset
         self.best_fitness_so_far = None
+        self.stats_reporter = neat.StatisticsReporter()
+        self.tb_writer = None
+        if SummaryWriter is not None:
+            tb_dir = os.path.join(self.metrics_dir, "tensorboard", "neat")
+            os.makedirs(tb_dir, exist_ok=True)
+            self.tb_writer = SummaryWriter(log_dir=tb_dir)
 
     def _get_actions(self, a):
         return self.actions[a.index(max(a))]
@@ -85,7 +97,21 @@ class Train:
             env.close()
 
     def _fitness_func(self, genome_id, genome, config, o):
-        metrics = self._evaluate_genome(genome_id, genome, config)
+        try:
+            metrics = self._evaluate_genome(genome_id, genome, config)
+        except Exception as e:
+            # Surface the error and still return a metrics row so CSVs are not missing generations.
+            print(f"Error evaluating genome {genome_id}: {e}")
+            metrics = {
+                "genome_id": genome_id,
+                "fitness": -1,
+                "distance": 0,
+                "steps": 0,
+                "early_stop": True,
+                "reward_sum": 0.0,
+                "level": self.level,
+                "error": str(e),
+            }
         o.put(metrics)
 
     def _eval_genomes(self, genomes, config):
@@ -115,8 +141,8 @@ class Train:
                 results = []
                 for _ in processes:
                     try:
-                        results.append(output.get_nowait())
-                    except Exception:
+                        results.append(output.get(timeout=5))
+                    except queue.Empty:
                         print("Warning: missing result from a worker process; skipping.")
 
                 for result in results:
@@ -139,8 +165,8 @@ class Train:
         p = neat.Population(config)
         p.add_reporter(neat.StdOutReporter(True))
         p.add_reporter(neat.Checkpointer(5))
-        stats = neat.StatisticsReporter()
-        p.add_reporter(stats)
+        p.add_reporter(self.stats_reporter)
+        p.add_reporter(self._artifact_reporter())
         print("Starting fresh population...")
         self.generation_offset = getattr(p, "generation", 0)
         winner = p.run(self._eval_genomes, n)
@@ -149,8 +175,10 @@ class Train:
         pickle.dump(win, open('real_winner.pkl', 'wb'))
 
         visualize.draw_net(config, winner, True)
-        visualize.plot_stats(stats, ylog=False, view=True)
-        visualize.plot_species(stats, view=True)
+        visualize.plot_stats(self.stats_reporter, ylog=False, view=False,
+                             filename=os.path.join(self.metrics_dir, "fitness.svg"))
+        visualize.plot_species(self.stats_reporter, view=False,
+                               filename=os.path.join(self.metrics_dir, "species.svg"))
 
     def main(self, config_file='config'):
         local_dir = os.path.dirname(__file__)
@@ -166,7 +194,9 @@ class Train:
             print(f"No logs recorded for generation {generation}, skipping metrics write.")
             return
         path = os.path.join(self.metrics_dir, f"gen_{generation:04d}.csv")
-        fieldnames = ["generation", "genome_id", "fitness", "distance", "steps", "early_stop", "reward_sum", "level"]
+        fieldnames = ["generation", "genome_id", "fitness", "distance", "steps", "early_stop", "reward_sum", "level", "error"]
+        for entry in logs:
+            entry.setdefault("error", "")
         with open(path, "w", newline="") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
@@ -197,6 +227,34 @@ class Train:
             f"early_stops={early_stops}/{len(logs)}"
         )
         print(summary)
+        summary_row = {
+            "generation": generation,
+            "best_fitness": max(fitnesses),
+            "mean_fitness": stats.mean(fitnesses),
+            "median_fitness": stats.median(fitnesses),
+            "std_fitness": stats.pstdev(fitnesses) if len(fitnesses) > 1 else 0,
+            "avg_distance": stats.mean(distances),
+            "avg_reward": stats.mean(reward_sums),
+            "early_stops": early_stops,
+            "population": len(genome_records),
+        }
+        if self.tb_writer:
+            self.tb_writer.add_scalar("fitness/best", summary_row["best_fitness"], generation)
+            self.tb_writer.add_scalar("fitness/mean", summary_row["mean_fitness"], generation)
+            self.tb_writer.add_scalar("fitness/median", summary_row["median_fitness"], generation)
+            self.tb_writer.add_scalar("fitness/std", summary_row["std_fitness"], generation)
+            self.tb_writer.add_scalar("distance/avg", summary_row["avg_distance"], generation)
+            self.tb_writer.add_scalar("reward/avg", summary_row["avg_reward"], generation)
+            self.tb_writer.add_scalar("early_stops/count", early_stops, generation)
+            self.tb_writer.flush()
+        summary_path = os.path.join(self.metrics_dir, "summary.csv")
+        summary_fields = list(summary_row.keys())
+        write_summary_header = not os.path.exists(summary_path)
+        with open(summary_path, "a", newline="") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=summary_fields)
+            if write_summary_header:
+                writer.writeheader()
+            writer.writerow(summary_row)
 
         # Save best genome of this generation and best overall.
         genome_map = {gid: g for gid, g in genome_records}
@@ -230,6 +288,12 @@ class Train:
                 pass
 
     def _apply_preset(self, config):
+        # Avoid NEAT complaining when many species spawn in generation 0.
+        config.reproduction_config.min_species_size = 1
+        # Fewer species explosions; tune if you want more/less speciation.
+        if hasattr(config.species_set_config, "compatibility_threshold") and config.species_set_config.compatibility_threshold < 5:
+            config.species_set_config.compatibility_threshold = 8.0
+            print("Raised compatibility_threshold to 8.0 to reduce species explosion.")
         if self.preset is None:
             return
         if self.preset == "debug":
@@ -241,6 +305,21 @@ class Train:
         elif self.preset == "full":
             # use defaults
             pass
+
+    def _artifact_reporter(self):
+        trainer = self
+
+        class ArtifactReporter(neat.reporting.BaseReporter):
+            def post_evaluate(self, config, population, species, best_genome):
+                try:
+                    visualize.plot_stats(trainer.stats_reporter, ylog=False, view=False,
+                                         filename=os.path.join(trainer.metrics_dir, "fitness.svg"))
+                    visualize.plot_species(trainer.stats_reporter, view=False,
+                                           filename=os.path.join(trainer.metrics_dir, "species.svg"))
+                except Exception as e:
+                    print(f"Could not write plots this generation: {e}")
+
+        return ArtifactReporter()
 
 
 if __name__ == "__main__":

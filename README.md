@@ -56,6 +56,7 @@ python src/main.py run --render
 ```
 Run looks for config and pickle files relative to `src/` when not given absolute paths.
 To run a neat checkpoint directly (compressed or not), point at it with `--file`; the best genome in the checkpoint population is used.
+When rendering you can slow playback with `--fps 30` (or `--fps 0` to run uncapped), record a GIF of the first episode with `--record out.gif`, and write per-episode run metrics to CSV with `--log-file path/to/run.csv` (defaults into `src/metrics`).
 <br>
 
 ## Config
@@ -78,6 +79,40 @@ simulation until it completes the level. `Ctrl + C` will stop it.
 <br>
 <img src="https://github.com/vivek3141/super-mario-neat/raw/master/img/world1-1.gif">
 <br>
+
+## What the network sees and outputs
+- Observations: the 13x16 tile grid is flattened into a 208-length vector of ints per step.
+- Actions: there are two discrete outputs. The larger value picks:
+  - `0` → `[0, 0, 0, 1, 0, 1]` (Right + A)
+  - `1` → `[0, 0, 0, 1, 1, 1]` (Right + B + A)
+
+## PPO (alternative to NEAT)
+Install extras if you want PPO/TensorBoard:
+```
+pip install "stable-baselines3==1.8.0" torch tensorboard
+```
+Train with PPO:
+```
+python src/main.py ppo_train --timesteps 100000 --level 1-1 --ppo-logdir src/metrics/ppo_logs
+```
+This saves models to `src/ppo_models/...` and logs (monitor.csv, evals, tensorboard) to the log dir.
+
+Run a saved PPO model:
+```
+python src/main.py ppo_run --ppo-model src/ppo_models/ppo_mario_1-1_YYYYMMDD_HHMMSS.zip --ppo-episodes 5 --render
+```
+Episode metrics write to `src/metrics/ppo/run_<timestamp>.csv`.
+TensorBoard:
+- PPO: `tensorboard --logdir src/metrics/ppo_logs --port 6006`
+- NEAT: fitness/species summaries are logged under `src/metrics/tensorboard/neat`; view with `tensorboard --logdir src/metrics/tensorboard/neat --port 6007`
+
+## Quick commands
+- NEAT train: `python src/main.py train --gen 10 --parallel 1 --level 1-1`
+- NEAT run finisher: `python src/main.py run --render --fps 30`
+- PPO train: `python src/main.py ppo_train --timesteps 100000 --level 1-1 --ppo-logdir src/metrics/ppo_logs`
+- PPO run: `python src/main.py ppo_run --ppo-model src/ppo_models/ppo_mario_1-1_<timestamp>.zip --ppo-episodes 5 --render`
+- TensorBoard NEAT: `tensorboard --logdir src/metrics/tensorboard/neat --port 6007`
+- TensorBoard PPO: `tensorboard --logdir src/metrics/ppo_logs --port 6006`
 
 ## Additional Information
 The [Wiki](https://github.com/vivek3141/super-mario-neat/wiki) contains more information regarding the specifics of implementing certain parts.

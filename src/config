@@ -45,7 +45,8 @@ single_structural_mutation = False
 structural_mutation_surer  = default
 
 feed_forward            = True
-initial_connection      = unconnected
+# Start fully connected with direct input->output links; avoids NEAT warnings and gives genomes a usable start.
+initial_connection      = full_direct
 
 # node add/remove rates
 node_add_prob           = 0.25
